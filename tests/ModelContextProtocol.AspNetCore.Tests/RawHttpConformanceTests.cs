@@ -620,6 +620,87 @@ public class RawHttpConformanceTests(ITestOutputHelper outputHelper) : KestrelIn
         Assert.Contains(MetaKeys.ClientCapabilities, json["error"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(McpProtocolVersions.November2025ProtocolVersion)]
+    public async Task Initialize_InvalidUtf8InProtocolVersion_Returns400_WithInvalidParams(string? protocolVersionHeader)
+    {
+        await StartAsync();
+
+        var content = JsonContentWithInvalidUtf8(
+            @"{""jsonrpc"":""2.0"",""id"":30,""method"":""initialize"",""params"":{""protocolVersion"":""2025-11-25",
+            @""",""capabilities"":{},""clientInfo"":{""name"":""raw"",""version"":""1.0""}}}");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "") { Content = content };
+        if (protocolVersionHeader is not null)
+        {
+            request.Headers.Add(ProtocolVersionHeader, protocolVersionHeader);
+        }
+        using var response = await HttpClient.SendAsync(request, TestContext.Current.CancellationToken);
+
+        // Invalid UTF-8 inside a string is a malformed request, so it must be a 400 that echoes the
+        // request id rather than an unhandled transcoding exception surfacing as a 500 (#1984).
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var json = await ReadJsonResponseAsync(response, TestContext.Current.CancellationToken);
+        Assert.Equal(30, json["id"]!.GetValue<long>());
+        Assert.Equal((int)McpErrorCode.InvalidParams, json["error"]!["code"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task July2026Post_InvalidUtf8InMetaProtocolVersion_Returns400_WithInvalidParams()
+    {
+        await StartAsync();
+
+        var content = JsonContentWithInvalidUtf8(
+            @"{""jsonrpc"":""2.0"",""id"":31,""method"":""server/discover"",""params"":{""_meta"":{""io.modelcontextprotocol/protocolVersion"":""2026-07-28",
+            @""",""io.modelcontextprotocol/clientInfo"":{""name"":""raw"",""version"":""1.0""},""io.modelcontextprotocol/clientCapabilities"":{}}}}");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "") { Content = content };
+        request.Headers.Add(ProtocolVersionHeader, McpProtocolVersions.July2026ProtocolVersion);
+        request.Headers.Add("Mcp-Method", "server/discover");
+        using var response = await HttpClient.SendAsync(request, TestContext.Current.CancellationToken);
+
+        // An unreadable _meta protocol version is rejected like any other malformed value (#1984).
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var json = await ReadJsonResponseAsync(response, TestContext.Current.CancellationToken);
+        Assert.Equal(31, json["id"]!.GetValue<long>());
+        Assert.Equal((int)McpErrorCode.InvalidParams, json["error"]!["code"]!.GetValue<int>());
+        Assert.Contains(MetaKeys.ProtocolVersion, json["error"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task July2026Post_InvalidUtf8InRoutingName_Returns400_WithHeaderMismatch()
+    {
+        await StartAsync();
+
+        var content = JsonContentWithInvalidUtf8(
+            @"{""jsonrpc"":""2.0"",""id"":32,""method"":""tools/call"",""params"":{""name"":""echo",
+            @""",""arguments"":{""text"":""hi""}," + July2026ProtocolMetaFragment() + "}}");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "") { Content = content };
+        request.Headers.Add(ProtocolVersionHeader, McpProtocolVersions.July2026ProtocolVersion);
+        request.Headers.Add("Mcp-Method", "tools/call");
+        request.Headers.Add("Mcp-Name", "echo");
+        using var response = await HttpClient.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var json = await ReadJsonResponseAsync(response, TestContext.Current.CancellationToken);
+        Assert.Equal(32, json["id"]!.GetValue<long>());
+        Assert.Equal((int)McpErrorCode.HeaderMismatch, json["error"]!["code"]!.GetValue<int>());
+    }
+
+    /// <summary>
+    /// Builds a JSON body with a raw 0xFF byte between <paramref name="before"/> and <paramref name="after"/>.
+    /// 0xFF never appears in valid UTF-8, but the JSON reader accepts it inside a string and only fails
+    /// once the string is transcoded.
+    /// </summary>
+    private static ByteArrayContent JsonContentWithInvalidUtf8(string before, string after)
+    {
+        var content = new ByteArrayContent([.. Encoding.UTF8.GetBytes(before), 0xFF, .. Encoding.UTF8.GetBytes(after)]);
+        content.Headers.ContentType = new("application/json");
+        return content;
+    }
+
     [McpServerToolType]
     private sealed class CapabilityTools
     {

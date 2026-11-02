@@ -519,6 +519,36 @@ public class HttpHeaderConformanceTests(ITestOutputHelper outputHelper) : Kestre
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Server_RejectsInvalidUtf8InHeaderAnnotatedArgument_WithJsonRpcError()
+    {
+        await StartAsync();
+        await ProbeWithJuly2026ProtocolVersionAsync();
+
+        // A raw 0xFF byte (never valid UTF-8) inside the "region" argument. The JSON reader accepts it and
+        // only fails when the string is transcoded for the Mcp-Param-Region comparison (#1984).
+        var callJson = CallTool("header_test", """{"region":"us-west1<0xFF>","priority":42,"verbose":false,"emptyVal":""}""");
+        var parts = callJson.Split("<0xFF>");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "");
+        request.Content = new ByteArrayContent([.. Encoding.UTF8.GetBytes(parts[0]), 0xFF, .. Encoding.UTF8.GetBytes(parts[1])]);
+        request.Content.Headers.ContentType = new("application/json");
+        request.Headers.Add("MCP-Protocol-Version", "2026-07-28");
+        request.Headers.Add("Mcp-Method", "tools/call");
+        request.Headers.Add("Mcp-Name", "header_test");
+        request.Headers.Add("Mcp-Param-Region", "us-west1");
+        request.Headers.Add("Mcp-Param-Priority", "42");
+        request.Headers.Add("Mcp-Param-Verbose", "false");
+        request.Headers.Add("Mcp-Param-EmptyVal", "");
+
+        using var response = await HttpClient.SendAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken))!;
+        Assert.Equal(_lastRequestId, json["id"]!.GetValue<long>());
+        Assert.Equal((int)McpErrorCode.HeaderMismatch, json["error"]!["code"]!.GetValue<int>());
+    }
+
     #endregion
 
     #region Client-side encoding tests (unit tests for McpHeaderEncoder)

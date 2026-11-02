@@ -835,15 +835,26 @@ internal sealed class StreamableHttpHandler(
 
         var protocolVersionHeader = context.Request.Headers[McpProtocolVersionHeaderName].ToString();
 
-        if (message is JsonRpcRequest { Method: RequestMethods.Initialize, Params: JsonObject initializeParams } &&
-            initializeParams["protocolVersion"] is JsonValue initializeProtocolVersionValue &&
-            initializeProtocolVersionValue.TryGetValue(out string? initializeProtocolVersion) &&
-            !string.IsNullOrEmpty(protocolVersionHeader) &&
-            !string.Equals(protocolVersionHeader, initializeProtocolVersion, StringComparison.Ordinal))
+        if (message is JsonRpcRequest { Method: RequestMethods.Initialize, Params: JsonObject initializeParams })
         {
-            errorDetail = CreateHeaderMismatchError(
-                $"Bad Request: The {McpProtocolVersionHeaderName} header value '{protocolVersionHeader}' does not match body params.protocolVersion value '{initializeProtocolVersion}'.");
-            return false;
+            if (!TryGetValidUtf8String(initializeParams["protocolVersion"], out var initializeProtocolVersion))
+            {
+                errorDetail = new JsonRpcErrorDetail
+                {
+                    Code = (int)McpErrorCode.InvalidParams,
+                    Message = "Bad Request: The body params.protocolVersion value is not valid UTF-8.",
+                };
+                return false;
+            }
+
+            if (initializeProtocolVersion is not null &&
+                !string.IsNullOrEmpty(protocolVersionHeader) &&
+                !string.Equals(protocolVersionHeader, initializeProtocolVersion, StringComparison.Ordinal))
+            {
+                errorDetail = CreateHeaderMismatchError(
+                    $"Bad Request: The {McpProtocolVersionHeaderName} header value '{protocolVersionHeader}' does not match body params.protocolVersion value '{initializeProtocolVersion}'.");
+                return false;
+            }
         }
 
         // Legacy headers leave reserved metadata opaque. Without a header, let the core server resolve
@@ -904,11 +915,11 @@ internal sealed class StreamableHttpHandler(
             _ => null,
         };
 
+        // A value that is not valid UTF-8 is treated like any other malformed value.
         string? value = null;
         if (parameters is JsonObject paramsObj &&
             paramsObj["_meta"] is JsonObject metaObj &&
-            metaObj[MetaKeys.ProtocolVersion] is JsonValue protocolVersionValue &&
-            protocolVersionValue.TryGetValue(out value) &&
+            TryGetValidUtf8String(metaObj[MetaKeys.ProtocolVersion], out value) &&
             !string.IsNullOrEmpty(value))
         {
             protocolVersion = value;
@@ -918,6 +929,37 @@ internal sealed class StreamableHttpHandler(
         protocolVersion = null;
         return false;
     }
+
+    /// <summary>
+    /// Gets the string value of a request JSON node, or <see langword="null"/> if the node is not a string.
+    /// Returns <see langword="false"/> if the string is not valid UTF-8.
+    /// </summary>
+    private static bool TryGetValidUtf8String(JsonNode? node, out string? value)
+    {
+        try
+        {
+            if (node is JsonValue jsonValue && jsonValue.TryGetValue(out value))
+            {
+                return true;
+            }
+        }
+        catch (InvalidOperationException ex) when (IsInvalidUtf8(ex))
+        {
+            value = null;
+            return false;
+        }
+
+        value = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Returns whether <paramref name="exception"/> was thrown while transcoding a request string that is not valid UTF-8.
+    /// Parsing the body does not validate UTF-8 inside strings, so reading such a string later throws. That is a
+    /// malformed request and must be rejected with 400 rather than surfacing as a 500.
+    /// </summary>
+    private static bool IsInvalidUtf8(InvalidOperationException exception) =>
+        exception.InnerException is System.Text.DecoderFallbackException;
 
     /// <summary>
     /// Refuses a 2026-07-28 (or later) request on a fully stateful server
@@ -1039,7 +1081,16 @@ internal sealed class StreamableHttpHandler(
             JsonRpcNotification notification => notification.Params,
             _ => null,
         };
-        var mcpNameInBody = GetJsonNodeStringProperty(bodyParams, routingNameParameter);
+        string? mcpNameInBody;
+        try
+        {
+            mcpNameInBody = GetJsonNodeStringProperty(bodyParams, routingNameParameter);
+        }
+        catch (InvalidOperationException ex) when (IsInvalidUtf8(ex))
+        {
+            errorMessage = $"Header mismatch: body '{routingNameParameter}' value is not valid UTF-8.";
+            return false;
+        }
 
         // Check that the header value matches the body value if the body value is present.
         if (!string.Equals(decodedMcpNameInHeader, mcpNameInBody, StringComparison.Ordinal))
@@ -1223,7 +1274,17 @@ internal sealed class StreamableHttpHandler(
                 argsObj.TryGetPropertyValue(property.Name, out var argNode) &&
                 argNode is not null)
             {
-                var expectedHeaderValue = McpHeaderEncoder.ConvertToHeaderValue(argNode);
+                string? expectedHeaderValue;
+                try
+                {
+                    expectedHeaderValue = McpHeaderEncoder.ConvertToHeaderValue(argNode);
+                }
+                catch (InvalidOperationException ex) when (IsInvalidUtf8(ex))
+                {
+                    errorMessage = $"Header mismatch: body argument '{property.Name}' is not valid UTF-8.";
+                    return false;
+                }
+
                 if (expectedHeaderValue is not null)
                 {
                     var decodedExpected = McpHeaderEncoder.DecodeValue(expectedHeaderValue);
