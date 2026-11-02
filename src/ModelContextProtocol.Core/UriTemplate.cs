@@ -499,7 +499,8 @@ internal static partial class UriTemplate
 
     /// <summary>
     /// Defines an equality comparer for Uri templates as follows:
-    /// 1. Non-templated Uris use regular System.Uri equality comparison (host name is case insensitive).
+    /// 1. Non-templated Uris use regular System.Uri equality comparison (host name is case insensitive),
+    ///    plus ordinal comparison of the user info and fragment, which System.Uri equality ignores.
     /// 2. Templated Uris use regular string equality.
     ///
     /// We do this because non-templated resources are looked up directly from the resource dictionary
@@ -516,7 +517,9 @@ internal static partial class UriTemplate
             if (TryParseAsNonTemplatedUri(uriTemplate1, out Uri? uri1) &&
                 TryParseAsNonTemplatedUri(uriTemplate2, out Uri? uri2))
             {
-                return uri1 == uri2;
+                return uri1 == uri2 &&
+                    string.Equals(uri1.UserInfo, uri2.UserInfo, StringComparison.Ordinal) &&
+                    string.Equals(uri1.Fragment, uri2.Fragment, StringComparison.Ordinal);
             }
 
             return string.Equals(uriTemplate1, uriTemplate2, StringComparison.Ordinal);

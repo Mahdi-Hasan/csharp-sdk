@@ -140,6 +140,29 @@ public sealed class McpServerResourceRoutingTests(ITestOutputHelper testOutputHe
         Assert.Equal("Request failed (remote): Unknown resource URI: 'test://params{?a1,a2,a3}'", mcpEx.Message);
     }
 
+    /// <summary>
+    /// Verify that static resources whose URIs differ only in the fragment or user info are kept as distinct resources.
+    /// Regression test for https://github.com/modelcontextprotocol/csharp-sdk/issues/1970.
+    /// </summary>
+    [Theory]
+    [InlineData("docs://guide#intro", "docs://guide#setup")]
+    [InlineData("docs://alice@host/x", "docs://bob@host/x")]
+    public async Task StaticResources_DifferingOnlyInFragmentOrUserInfo_AreDistinct(string firstUri, string secondUri)
+    {
+        var client = await CreateClientWithResourcesAsync(
+            McpServerResource.Create(options: new() { UriTemplate = firstUri, Name = "first" }, method: () => "first"),
+            McpServerResource.Create(options: new() { UriTemplate = secondUri, Name = "second" }, method: () => "second"));
+
+        var resources = await client.ListResourcesAsync(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal([firstUri, secondUri], resources.Select(r => r.Uri).OrderBy(u => u, StringComparer.Ordinal));
+
+        var firstResult = await client.ReadResourceAsync(firstUri, null, TestContext.Current.CancellationToken);
+        Assert.Equal("first", ((TextResourceContents)firstResult.Contents[0]).Text);
+
+        var secondResult = await client.ReadResourceAsync(secondUri, null, TestContext.Current.CancellationToken);
+        Assert.Equal("second", ((TextResourceContents)secondResult.Contents[0]).Text);
+    }
+
     #region Level 1: Simple String Expansion {var}
 
     [Fact]
